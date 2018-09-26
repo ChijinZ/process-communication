@@ -16,6 +16,7 @@ pub struct UdsFuzzServer<T> {
     // connetions is used to map client's name to sender of channel.
     pub path_name: String,
     pub name: String,
+    phantom: PhantomData<T>,
 }
 
 impl<T> UdsFuzzServer<T>
@@ -24,11 +25,11 @@ impl<T> UdsFuzzServer<T>
     /// *addr* is socket address. like: 127.0.0.1:6666.
     ///
     /// *name* is the server's name, to identity which server it is.
-    pub fn new(path_name: &str, server_name: &str) -> UDSMsgServer<T> {
-        UDSMsgServer {
+    pub fn new(path_name: &str, server_name: &str) -> UdsFuzzServer<T> {
+        UdsFuzzServer {
             path_name: String::from(path_name),
             name: String::from(server_name),
-            connections: Arc::new(Mutex::new(HashMap::new())),
+            phantom: PhantomData,
         }
     }
 
@@ -42,7 +43,7 @@ impl<T> UdsFuzzServer<T>
     pub fn start_server<F>(&self, first_msg: T,
                            process_function: F)
                            -> Box<Future<Item=(), Error=()> + Send + 'static>
-        where F: FnMut(String, T) -> Vec<(String, T)> + Send + Sync + 'static + Clone
+        where F: FnMut(String, T) -> Vec<T> + Send + Sync + 'static + Clone
     {
         let path = Path::new(&self.path_name);
         let listener = UnixListener::bind(path)
@@ -68,8 +69,8 @@ impl<T> UdsFuzzClient<T>
 {
     /// *addr* is socket address. like: 127.0.0.1:6666.
     /// *name* is the client's name, to identity which client it is.
-    pub fn new(path_name: &str, client_name: &str) -> UDSMsgClient<T> {
-        UDSMsgClient {
+    pub fn new(path_name: &str, client_name: &str) -> UdsFuzzClient<T> {
+        UdsFuzzClient {
             path_name: String::from(path_name),
             name: String::from(client_name),
             phantom: PhantomData,

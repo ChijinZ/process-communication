@@ -15,6 +15,7 @@ pub struct TcpFuzzServer<T> {
     // connetions is used to map client's name to sender of channel.
     pub addr: SocketAddr,
     pub name: String,
+    phantom: PhantomData<T>,
 }
 
 impl<T> TcpFuzzServer<T>
@@ -23,12 +24,12 @@ impl<T> TcpFuzzServer<T>
     /// *addr* is socket address. like: 127.0.0.1:6666.
     ///
     /// *name* is the server's name, to identity which server it is.
-    pub fn new(addr: &str, server_name: &str) -> TCPMsgServer<T> {
+    pub fn new(addr: &str, server_name: &str) -> TcpFuzzServer<T> {
         let socket_addr = addr.parse::<SocketAddr>().unwrap();
-        TCPMsgServer {
+        TcpFuzzServer {
             addr: socket_addr,
             name: String::from(server_name),
-            connections: Arc::new(Mutex::new(HashMap::new())),
+            phantom: PhantomData,
         }
     }
 
@@ -42,7 +43,7 @@ impl<T> TcpFuzzServer<T>
     pub fn start_server<F>(&self, first_msg: T,
                            process_function: F)
                            -> Box<Future<Item=(), Error=()> + Send + 'static>
-        where F: FnMut(String, T) -> Vec<(String, T)> + Send + Sync + 'static + Clone
+        where F: FnMut(String, T) -> Vec<T> + Send + Sync + 'static + Clone
     {
         let listener = net::TcpListener::bind(&self.addr)
             .expect("unable to bind TCP listener");
@@ -69,9 +70,9 @@ impl<T> TcpFuzzClient<T>
     /// *addr* is socket address. like: 127.0.0.1:6666.
     ///
     /// *name* is the client's name, to identity which client it is.
-    pub fn new(addr: &str, client_name: &str) -> TCPMsgClient<T> {
+    pub fn new(addr: &str, client_name: &str) -> TcpFuzzClient<T> {
         let socket_addr = addr.parse::<SocketAddr>().unwrap();
-        TCPMsgClient {
+        TcpFuzzClient {
             connect_addr: socket_addr,
             name: String::from(client_name),
             phantom: PhantomData,

@@ -42,8 +42,7 @@ use tokio::io;
 use tokio_codec::*;
 use bytes::{BufMut, BytesMut};
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex, RwLock};
-use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use futures::sync::mpsc;
 
 // The number of bytes to represent data size.
@@ -160,7 +159,7 @@ fn start_server<T, F, U>(incoming: U, first_msg: T,
                          server_name: String)
                          -> Box<Future<Item=(), Error=()> + Send + 'static>
     where T: serde::de::DeserializeOwned + serde::Serialize + Send + 'static + Clone,
-          F: FnMut(String, T) -> Vec<(String, T)> + Send + Sync + 'static + Clone,
+          F: FnMut(String, T) -> Vec<T> + Send + Sync + 'static + Clone,
           U: Stream + Send + Sync + 'static,
           <U as futures::Stream>::Item: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Sync,
           <U as futures::Stream>::Error: std::fmt::Debug + 'static + Send + Sync
@@ -196,47 +195,31 @@ fn start_server<T, F, U>(incoming: U, first_msg: T,
                 // Spawn a receiver task.
                 let receive_and_process =
                     {
-                        let connections = connections_outer.clone();
                         let mut client_name = client_name.clone();
                         stream.for_each(move |(name, msg): (Option<String>, Option<T>)| {
-                            let connections_inner = connections.clone();
                             match name {
                                 // If it is a register information, register to connections.
                                 Some(register_name) => {
                                     client_name.write().unwrap().push_str(&register_name);
-                                    let mut tx_inner = tx.clone();
-                                    tx_inner.try_send(Some(first_msg_inner.clone())).unwrap();
-                                    connections_inner.lock().unwrap().insert(register_name, tx_inner);
+                                    tx.clone().try_send(Some(first_msg_inner.clone())).unwrap();
                                 }
                                 // If it is a user's message, process it.
                                 None => {
                                     let msg = msg.unwrap();
                                     let mut process_function_inner = process_function_outer.clone();
-                                    let dest_and_msg = process_function_inner(client_name.read().unwrap().to_string(), msg);
-                                    for (dest, msg) in dest_and_msg {
-                                        if dest == "" {
-                                            let mut tx_inner = tx.clone();
-                                            tx_inner.try_send(Some(msg)).unwrap();
-                                        } else {
-                                            if connections_inner.lock().unwrap().contains_key(&dest) {
-                                                connections_inner.lock().unwrap().get_mut(&dest).unwrap()
-                                                    .try_send(Some(msg)).unwrap();
-                                            } else {
-                                                println!("{} doesn't register", dest);
-                                            }
-                                        }
+                                    let some_msgs = process_function_inner(client_name.read().unwrap().to_string(), msg);
+                                    for msg in some_msgs{
+                                        tx.clone().try_send(Some(msg)).unwrap();
                                     }
                                 }
                             }
                             Ok(())
                         })
                     };
-                let connections = connections_outer.clone();
                 tokio::spawn(
                     send_to_client.select(receive_and_process)
                         .and_then(move |_| {
                             println!("{} disconnect",*client_name.read().unwrap());
-                            connections.lock().unwrap().remove(&*client_name.read().unwrap());
                             Ok(())
                         }).map_err(|_| {})
                 );
@@ -321,23 +304,23 @@ pub mod uds;
 pub fn create_tcp_fuzz_server<T>(addr: &str, server_name: &str) -> tcp::TcpFuzzServer<T>
     where T: serde::de::DeserializeOwned + serde::Serialize + Send + 'static + Clone
 {
-    tcp::TCPMsgServer::new(addr, server_name)
+    tcp::TcpFuzzServer::new(addr, server_name)
 }
 
 pub fn create_tcp_fuzz_client<T>(addr: &str, client_name: &str) -> tcp::TcpFuzzClient<T>
     where T: serde::de::DeserializeOwned + serde::Serialize + Send + 'static + Clone
 {
-    tcp::TCPMsgClient::new(addr, client_name)
+    tcp::TcpFuzzClient::new(addr, client_name)
 }
 
 pub fn create_uds_fuzz_server<T>(addr: &str, server_name: &str) -> uds::UdsFuzzServer<T>
     where T: serde::de::DeserializeOwned + serde::Serialize + Send + 'static + Clone
 {
-    uds::UDSMsgServer::new(addr, server_name)
+    uds::UdsFuzzServer::new(addr, server_name)
 }
 
 pub fn create_uds_fuzz_client<T>(addr: &str, client_name: &str) -> uds::UdsFuzzClient<T>
     where T: serde::de::DeserializeOwned + serde::Serialize + Send + 'static + Clone
 {
-    uds::UDSMsgClient::new(addr, client_name)
+    uds::UdsFuzzClient::new(addr, client_name)
 }
