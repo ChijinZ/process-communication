@@ -66,24 +66,11 @@ pub fn four_vecu8_to_number(vec: Vec<u8>) -> u64 {
 }
 
 impl<T> Encoder for MessageCodec<T> where T: serde::Serialize {
-    type Item = Option<T>;
+    type Item = (String, T);
     type Error = io::Error;
     fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
         let mut data: Vec<u8> = vec![];
-        match item {
-            // If None, it is a register information, so state is 0 and data is register
-            // information (i.e. name).
-            None => {
-                data.push(0 as u8);
-                let mut name = self.name.clone().into_bytes();
-                data.append(&mut name);
-            }
-            // If not None, it is user's message, so state is 1.
-            Some(v) => {
-                data.push(1 as u8);
-                data.append(&mut serialize(&v).unwrap());
-            }
-        }
+        data.append(&mut serialize(&item).unwrap());
         let mut encoder: Vec<u8> = number_to_four_vecu8(data.len() as u64);
         encoder.append(&mut data);
         dst.reserve(encoder.len());
@@ -93,31 +80,18 @@ impl<T> Encoder for MessageCodec<T> where T: serde::Serialize {
 }
 
 impl<T> Decoder for MessageCodec<T> where T: serde::de::DeserializeOwned {
-    type Item = (Option<String>, Option<T>);
+    type Item = (String, T);
     type Error = io::Error;
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         if src.len() < DATA_SIZE {
             Ok(None)
         } else {
             let mut vec: Vec<u8> = src.to_vec();
-            let mut truth_data = vec.split_off(DATA_SIZE);
+            let truth_data = vec.split_off(DATA_SIZE);
             let vec_length = four_vecu8_to_number(vec);
             if truth_data.len() == vec_length as usize {
-                let msg_data = truth_data.split_off(1);
                 src.clear();
-                match truth_data[0] {
-                    // Deserialize it is register information or user's message.
-                    0 => {
-                        Ok(Some((Some(String::from_utf8(msg_data).unwrap()), None)))
-                    }
-                    1 => {
-                        let msg: T = deserialize(&msg_data).unwrap();
-                        Ok(Some((None, Some(msg))))
-                    }
-                    _ => {
-                        panic!("unexpected message");
-                    }
-                }
+                Ok(Some(deserialize(&truth_data).unwrap()))
             } else {
                 Ok(None)
             }
@@ -130,8 +104,8 @@ impl<T> Decoder for MessageCodec<T> where T: serde::de::DeserializeOwned {
 //U is to abstract tcp and uds
 fn start_server<T, F, U>(listener_incoming: U,
                          register_logic: F,
-                         user_tx: Arc<RwLock<Option<mpsc::Sender<Option<T>>>>>,
-                         server_tx: Box<std::sync::mpsc::Sender<Option<T>>>,
+                         user_tx: Arc<RwLock<Option<mpsc::Sender<(String, T)>>>>,
+                         server_tx: Box<std::sync::mpsc::Sender<(String, T)>>,
                          server_name: String)
                          -> Box<Future<Item=(), Error=()> + Send + 'static>
     where T: serde::de::DeserializeOwned + serde::Serialize + Send + 'static + Clone,
@@ -148,8 +122,8 @@ fn start_server<T, F, U>(listener_incoming: U,
                 let server_tx = server_tx.clone();
                 let user_tx = user_tx.clone();
 
-                let (tx, rx): (mpsc::Sender<Option<T>>, mpsc::Receiver<Option<T>>) = mpsc::channel(0);
-                let rx: Box<Stream<Item=Option<T>, Error=io::Error> + Send> = Box::new(rx.map_err(|_| panic!()));
+                let (tx, rx): (mpsc::Sender<(String, T)>, mpsc::Receiver<(String, T)>) = mpsc::channel(0);
+                let rx: Box<Stream<Item=(String, T), Error=io::Error> + Send> = Box::new(rx.map_err(|_| panic!()));
 
                 // Split tcp_stream to sink and stream. Sink responses to send messages to this
                 // client, stream responses to receive messages from this client.
@@ -169,22 +143,17 @@ fn start_server<T, F, U>(listener_incoming: U,
                 let receive_and_process =
                     {
                         let mut client_name = client_name.clone();
-                        stream.for_each(move |(name, msg): (Option<String>, Option<T>)| {
-                            match name {
-                                // If it is a register information, send to register_logic.
-                                Some(register_name) => {
-                                    client_name.write().unwrap().push_str(&register_name);
-                                    let v: Vec<&str> = register_name.split(' ').collect();
-                                    if v[0] == "leader" {
-                                        *user_tx.write().unwrap() = Some(tx.clone());
-                                    }
-                                    register_logic.clone()(v[0], v[1].parse::<u64>().unwrap());
+                        stream.for_each(move |(name, msg)| {
+                            if client_name.read().unwrap().len() == 0 {
+                                client_name.write().unwrap().push_str(&name);
+                                let v: Vec<&str> = name.split(' ').collect();
+                                if v[0] == "leader" {
+                                    *user_tx.write().unwrap() = Some(tx.clone());
                                 }
-                                // If it is a user's message, process it.
-                                None => {
-                                    if client_name.read().unwrap().contains("leader") {
-                                        server_tx.send(msg).unwrap();
-                                    }
+                                register_logic.clone()(v[0], v[1].parse::<u64>().unwrap());
+                            } else {
+                                if client_name.read().unwrap().contains("leader") {
+                                    server_tx.send((name, msg)).unwrap();
                                 }
                             }
                             Ok(())
@@ -206,27 +175,20 @@ fn start_server<T, F, U>(listener_incoming: U,
 //U is to abstract tcp and uds
 fn start_client<T, U>(connect: U,
                       client_name: String,
-                      user_tx: Arc<RwLock<Option<mpsc::Sender<Option<T>>>>>,
-                      client_tx: Box<std::sync::mpsc::Sender<Option<T>>>)
+                      user_tx: Arc<RwLock<Option<mpsc::Sender<(String, T)>>>>,
+                      client_tx: Box<std::sync::mpsc::Sender<(String, T)>>)
                       -> Box<Future<Item=(), Error=()> + Send + 'static>
     where T: serde::de::DeserializeOwned + serde::Serialize + Send + 'static + Clone,
           U: Future + Send + Sync + 'static,
           <U as futures::Future>::Item: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Sync,
           <U as futures::Future>::Error: std::fmt::Debug + 'static + Send + Sync
 {
-    let (tx, rx): (mpsc::Sender<Option<T>>, mpsc::Receiver<Option<T>>) = mpsc::channel(0);
-    let rx: Box<Stream<Item=Option<T>, Error=io::Error> + Send> = Box::new(rx.map_err(|_| panic!()));
+    let (tx, rx): (mpsc::Sender<(String, T)>, mpsc::Receiver<(String, T)>) = mpsc::channel(0);
+    let rx: Box<Stream<Item=(String, T), Error=io::Error> + Send> = Box::new(rx.map_err(|_| panic!()));
     *user_tx.write().unwrap() = Some(tx.clone());
     Box::new(
-        connect.and_then(move |mut tcp_stream| {
-            let mut message_codec: MessageCodec<T> = MessageCodec::new(client_name);
-
-            // Send register information to server.
-            let mut buf = BytesMut::new();
-            let _ = message_codec.encode(None, &mut buf);
-            let _ = tcp_stream.write_all(&buf);
-
-
+        connect.and_then(move |tcp_stream| {
+            let message_codec: MessageCodec<T> = MessageCodec::new(client_name);
             let (sink, stream) = message_codec.framed(tcp_stream).split();
 
             // Spawn a sender task.
@@ -238,26 +200,13 @@ fn start_client<T, U>(connect: U,
             });
 
             // Spawn a receiver task.
-            let receive_and_process = stream.for_each(move |(name, msg): (Option<String>, Option<T>)| {
-                match name {
-                    Some(_) => {
-                        println!("client received unexpected message");
-                    }
-                    None => {
-                        client_tx.send(msg).unwrap();
-                    }
-                }
+            let receive_and_process = stream.for_each(move |(name, msg)| {
+                client_tx.send((name, msg)).unwrap();
                 Ok(())
             }).map_err(|e| { println!("faild to connect. err:{:?}", e); });
+
             tokio::spawn(send_to_server);
             tokio::spawn(receive_and_process);
-//            tokio::spawn(
-//                send_to_server.select(receive_and_process)
-//                    .and_then(|_| {
-//                        println!("closed");
-//                        Ok(())
-//                    }).map_err(|_| {})
-//            );
             Ok(())
         }).map_err(|e| { println!("faild to connect. err:{:?}", e); })
     )

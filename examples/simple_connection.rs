@@ -19,9 +19,9 @@ fn main() {
 }
 
 fn server() {
-    let mut user_tx:Arc<RwLock<Option<future_mpsc::Sender<Option<u32>>>>> = Arc::new(RwLock::new(None));
-    let (server_tx, user_rx): (std_mpsc::Sender<Option<u32>>, std_mpsc::Receiver<Option<u32>>) = std_mpsc::channel();
-    let server: tcp::TcpFuzzServer<u32> = create_tcp_fuzz_server("127.0.0.1:6666", "server");
+    let mut user_tx = Arc::new(RwLock::new(None));
+    let (server_tx, user_rx) = std_mpsc::channel();
+    let server: uds::UdsFuzzServer<u32> = create_uds_fuzz_server("./a", "server");
     let server_task =
         server.start_server(user_tx.clone(),
                             Box::new(server_tx),
@@ -31,20 +31,40 @@ fn server() {
     std::thread::spawn(|| {
         tokio::run(server_task);
     });
-    std::thread::sleep_ms(10000);
-    let x = user_tx.read().unwrap().clone().unwrap().try_send(Some(666)).unwrap();
-    std::thread::sleep_ms(10000);
+    std::thread::sleep_ms(5000);
+    while true {
+        let (name, msg) = user_rx.recv().unwrap();
+        println!("{}", msg);
+        user_tx.read().unwrap().clone().unwrap().try_send((name.clone(), msg + 1)).unwrap();
+    }
 }
 
 fn client() {
     let user_tx = Arc::new(RwLock::new(None));
-    let (client_tx, user_rx): (std_mpsc::Sender<Option<u32>>, std_mpsc::Receiver<Option<u32>>) = std_mpsc::channel();
-    let client: tcp::TcpFuzzClient<u32> = create_tcp_fuzz_client("127.0.0.1:6666", format!("leader {}", std::process::id()).as_str());
+    let (client_tx, user_rx) = std_mpsc::channel();
+    let name = format!("leader {}", std::process::id());
+    let client: uds::UdsFuzzClient<u32> = create_uds_fuzz_client("./a", name.as_str());
     let client_task =
-        client.start_client(user_tx,
+        client.start_client(user_tx.clone(),
                             Box::new(client_tx));
     std::thread::spawn(move || {
-    tokio::run(client_task);
+        tokio::run(client_task);
     });
-    println!("{}", user_rx.recv().unwrap().unwrap());
+    user_tx.read().unwrap().clone().unwrap().try_send((name.clone(), 0)).unwrap();
+    std::thread::sleep_ms(10);
+    user_tx.read().unwrap().clone().unwrap().try_send((name.clone(), 0)).unwrap();
+    use std::time::{Duration, Instant};
+    let instant = Instant::now();
+    let how_much_time = Duration::from_secs(10);
+    while instant.elapsed() < how_much_time {
+        match user_rx.recv() {
+            Ok((name, msg)) => {
+                println!("{}", msg);
+                user_tx.read().unwrap().clone().unwrap().try_send((name.clone(), msg + 1)).unwrap();
+            }
+            Err(_) =>{
+                println!("fuck");
+            }
+        }
+    }
 }

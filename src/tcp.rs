@@ -34,8 +34,8 @@ impl<T> TcpFuzzServer<T>
     }
 
     pub fn start_server<F>(&self,
-                           user_tx: Arc<RwLock<Option<mpsc::Sender<Option<T>>>>>,
-                           server_tx: Box<std::sync::mpsc::Sender<Option<T>>>,
+                           user_tx: Arc<RwLock<Option<mpsc::Sender<(String, T)>>>>,
+                           server_tx: Box<std::sync::mpsc::Sender<(String, T)>>,
                            register_logic: F)
                            -> Box<Future<Item=(), Error=()> + Send + 'static>
         where F: FnMut(&str, u64) + Send + Sync + 'static + Clone
@@ -76,8 +76,8 @@ impl<T> TcpFuzzClient<T>
     }
 
     pub fn start_client(&self,
-                        user_tx: Arc<RwLock<Option<mpsc::Sender<Option<T>>>>>,
-                        client_tx: Box<std::sync::mpsc::Sender<Option<T>>>)
+                        user_tx: Arc<RwLock<Option<mpsc::Sender<(String, T)>>>>,
+                        client_tx: Box<std::sync::mpsc::Sender<(String, T)>>)
                         -> Box<Future<Item=(), Error=()> + Send + 'static>
     {
         start_client(net::TcpStream::connect(&self.connect_addr),

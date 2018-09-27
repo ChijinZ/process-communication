@@ -34,11 +34,11 @@ impl<T> UdsFuzzServer<T>
     }
 
     pub fn start_server<F>(&self,
-                           user_tx: Arc<RwLock<Option<mpsc::Sender<Option<T>>>>>,
-                           server_tx: Box<std::sync::mpsc::Sender<Option<T>>>,
+                           user_tx: Arc<RwLock<Option<mpsc::Sender<(String, T)>>>>,
+                           server_tx: Box<std::sync::mpsc::Sender<(String, T)>>,
                            register_logic: F)
                            -> Box<Future<Item=(), Error=()> + Send + 'static>
-        where F: FnMut(&str, u64) + Send + Sync + 'static + Clone+ std::fmt::Debug
+        where F: FnMut(&str, u64) + Send + Sync + 'static + Clone
     {
         let path = Path::new(&self.path_name);
         let listener = UnixListener::bind(path)
@@ -74,8 +74,8 @@ impl<T> UdsFuzzClient<T>
     }
 
     pub fn start_client(&self,
-                        user_tx: Arc<RwLock<Option<mpsc::Sender<Option<T>>>>>,
-                        client_tx: Box<std::sync::mpsc::Sender<Option<T>>>)
+                        user_tx: Arc<RwLock<Option<mpsc::Sender<(String, T)>>>>,
+                        client_tx: Box<std::sync::mpsc::Sender<(String, T)>>)
                         -> Box<Future<Item=(), Error=()> + Send + 'static>
     {
         start_client(UnixStream::connect(Path::new(&self.path_name)),
