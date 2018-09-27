@@ -6,16 +6,8 @@ exclude = [".idea/*"]
 #license = "MIT"
 
 [[example]]
-name = "simple_connection"
+name = "example"
 path = "examples/simple_connection.rs"
-
-[[example]]
-name = "transmit_multiple_structs"
-path = "examples/transmit_multiple_structs.rs"
-
-[[example]]
-name = "master_and_slave"
-path = "examples/master_and_slave.rs"
 
 [dependencies]
 tokio = "0.1"

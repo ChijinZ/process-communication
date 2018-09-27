@@ -1,21 +1,13 @@
-//! A simple transmitting-u32 example between server and client.
-//!
-//! You can test this out by running:
-//!
-//!     cargo run --example simple_connection server
-//!
-//! And then in another window run:
-//!
-//!     cargo run --example simple_connection client
-//!
-//! If it works, client should receive even number and server should receive odd number until client
-//! receives 20.
-
 extern crate tokio;
-extern crate msg_transmitter;
+extern crate futures;
+extern crate process_communication;
 
-use msg_transmitter::*;
+use process_communication::*;
+use tokio::prelude::*;
+use futures::sync::mpsc as future_mpsc;
+use std::sync::mpsc as std_mpsc;
 use std::env;
+use std::sync::{Arc, RwLock};
 
 fn main() {
     let a = env::args().skip(1).collect::<Vec<_>>();
@@ -27,23 +19,32 @@ fn main() {
 }
 
 fn server() {
-    let server = create_tcp_server("127.0.0.1:6666", "server");
-    let server_task = server.start_server(0, |client_name, msg| {
-        println!("{}: {}", client_name, msg);
-        vec![(client_name, msg + 1)]
+    let mut user_tx:Arc<RwLock<Option<future_mpsc::Sender<Option<u32>>>>> = Arc::new(RwLock::new(None));
+    let (server_tx, user_rx): (std_mpsc::Sender<Option<u32>>, std_mpsc::Receiver<Option<u32>>) = std_mpsc::channel();
+    let server: tcp::TcpFuzzServer<u32> = create_tcp_fuzz_server("127.0.0.1:6666", "server");
+    let server_task =
+        server.start_server(user_tx.clone(),
+                            Box::new(server_tx),
+                            |name, pid| {
+                                println!("{},{}", name, pid);
+                            });
+    std::thread::spawn(|| {
+        tokio::run(server_task);
     });
-    tokio::run(server_task);
+    std::thread::sleep_ms(10000);
+    let x = user_tx.read().unwrap().clone().unwrap().try_send(Some(666)).unwrap();
+    std::thread::sleep_ms(10000);
 }
 
 fn client() {
-    let client = create_tcp_client("127.0.0.1:6666", "client");
-    let client_task = client.start_client(|msg: u32| {
-        println!("{}", msg);
-        if msg < 20 {
-            vec![msg + 1]
-        } else {
-            std::process::exit(0);
-        }
-    });
+    let user_tx = Arc::new(RwLock::new(None));
+    let (client_tx, user_rx): (std_mpsc::Sender<Option<u32>>, std_mpsc::Receiver<Option<u32>>) = std_mpsc::channel();
+    let client: tcp::TcpFuzzClient<u32> = create_tcp_fuzz_client("127.0.0.1:6666", format!("leader {}", std::process::id()).as_str());
+    let client_task =
+        client.start_client(user_tx,
+                            Box::new(client_tx));
+    std::thread::spawn(move || {
     tokio::run(client_task);
+    });
+    println!("{}", user_rx.recv().unwrap().unwrap());
 }

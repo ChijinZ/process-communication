@@ -1,29 +1,3 @@
-//! # msg-transmitter
-//!
-//! ## Overview
-//! It is a library of single server multiple clients model. The main purpose of this library
-//! is helping users more focus on communication logic instead of low-level networking design.
-//! User can transmit any structs between server and client.
-//!
-//! User is able to choose either tcp-based or uds-based connection. Note that tcp-based connection
-//! can support both Windows and *nux, but uds-based connection only can support *nux.
-//!
-//! ## dependances
-//! - Main networking architecture impletmented by asynchronous
-//! framework [tokio](https://github.com/tokio-rs/tokio) and
-//! [futures](https://github.com/rust-lang-nursery/futures-rs).
-//!
-//! - User data are transfered to bytes by serialization framework
-//! [serde](https://github.com/serde-rs/serde) and binary encoder/decoder
-//! crate [bincode](https://github.com/TyOverby/bincode).
-//!
-//! ## example
-//! Examples can be found [here](https://github.com/ChijinZ/msg-transmitter/tree/master/examples).
-//!
-//! ## Design
-//! Design can be found [here](https://github.com/ChijinZ/msg-transmitter/blob/dev/readme.md)
-//!
-//! This crate is created by ChijinZ(tlock.chijin@gmail.com).
 // #![feature(nll)]
 #![deny(warnings, missing_debug_implementations)]
 
@@ -154,25 +128,26 @@ impl<T> Decoder for MessageCodec<T> where T: serde::de::DeserializeOwned {
 //T is user message type
 //F is the closure of control logic
 //U is to abstract tcp and uds
-fn start_server<T, F, U>(incoming: U, first_msg: T,
-                         process_function: F,
+fn start_server<T, F, U>(listener_incoming: U,
+                         register_logic: F,
+                         user_tx: Arc<RwLock<Option<mpsc::Sender<Option<T>>>>>,
+                         server_tx: Box<std::sync::mpsc::Sender<Option<T>>>,
                          server_name: String)
                          -> Box<Future<Item=(), Error=()> + Send + 'static>
     where T: serde::de::DeserializeOwned + serde::Serialize + Send + 'static + Clone,
-          F: FnMut(String, T) -> Vec<T> + Send + Sync + 'static + Clone,
+          F: FnMut(&str, u64) + Send + Sync + 'static + Clone,
           U: Stream + Send + Sync + 'static,
           <U as futures::Stream>::Item: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Sync,
           <U as futures::Stream>::Error: std::fmt::Debug + 'static + Send + Sync
 {
     Box::new(
-        incoming
+        listener_incoming
             .for_each(move |stream| {
-                let process_function_outer = process_function.clone();
+                let register_logic = register_logic.clone();
                 let server_name = server_name.clone();
-                let first_msg_inner = first_msg.clone();
+                let server_tx = server_tx.clone();
+                let user_tx = user_tx.clone();
 
-                // Create a mpsc::channel in order to build a bridge between sender task and receiver
-                // task.
                 let (tx, rx): (mpsc::Sender<Option<T>>, mpsc::Receiver<Option<T>>) = mpsc::channel(0);
                 let rx: Box<Stream<Item=Option<T>, Error=io::Error> + Send> = Box::new(rx.map_err(|_| panic!()));
 
@@ -187,29 +162,28 @@ fn start_server<T, F, U>(incoming: U, first_msg: T,
                     }
                     Ok(())
                 });
-                //tokio::spawn(send_to_client);
 
                 // To record the client_name
                 let client_name = Arc::new(RwLock::new(String::new()));
-                // let client_name_ref = &mut client_name;
                 // Spawn a receiver task.
                 let receive_and_process =
                     {
                         let mut client_name = client_name.clone();
                         stream.for_each(move |(name, msg): (Option<String>, Option<T>)| {
                             match name {
-                                // If it is a register information, register to connections.
+                                // If it is a register information, send to register_logic.
                                 Some(register_name) => {
                                     client_name.write().unwrap().push_str(&register_name);
-                                    tx.clone().try_send(Some(first_msg_inner.clone())).unwrap();
+                                    let v: Vec<&str> = register_name.split(' ').collect();
+                                    if v[0] == "leader" {
+                                        *user_tx.write().unwrap() = Some(tx.clone());
+                                    }
+                                    register_logic.clone()(v[0], v[1].parse::<u64>().unwrap());
                                 }
                                 // If it is a user's message, process it.
                                 None => {
-                                    let msg = msg.unwrap();
-                                    let mut process_function_inner = process_function_outer.clone();
-                                    let some_msgs = process_function_inner(client_name.read().unwrap().to_string(), msg);
-                                    for msg in some_msgs{
-                                        tx.clone().try_send(Some(msg)).unwrap();
+                                    if client_name.read().unwrap().contains("leader") {
+                                        server_tx.send(msg).unwrap();
                                     }
                                 }
                             }
@@ -219,7 +193,7 @@ fn start_server<T, F, U>(incoming: U, first_msg: T,
                 tokio::spawn(
                     send_to_client.select(receive_and_process)
                         .and_then(move |_| {
-                            println!("{} disconnect",*client_name.read().unwrap());
+                            println!("{} disconnect", *client_name.read().unwrap());
                             Ok(())
                         }).map_err(|_| {})
                 );
@@ -229,23 +203,20 @@ fn start_server<T, F, U>(incoming: U, first_msg: T,
 }
 
 //T is user message type
-//F is the closure of control logic
 //U is to abstract tcp and uds
-fn start_client<T, F, U>(connect: U,
-                         client_name: String,
-                         mut process_function: F)
-                         -> Box<Future<Item=(), Error=()> + Send + 'static>
+fn start_client<T, U>(connect: U,
+                      client_name: String,
+                      user_tx: Arc<RwLock<Option<mpsc::Sender<Option<T>>>>>,
+                      client_tx: Box<std::sync::mpsc::Sender<Option<T>>>)
+                      -> Box<Future<Item=(), Error=()> + Send + 'static>
     where T: serde::de::DeserializeOwned + serde::Serialize + Send + 'static + Clone,
-          F: FnMut(T) -> Vec<T> + Send + Sync + 'static,
           U: Future + Send + Sync + 'static,
           <U as futures::Future>::Item: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Sync,
           <U as futures::Future>::Error: std::fmt::Debug + 'static + Send + Sync
 {
-    // Create a mpsc::channel in order to build a bridge between sender task and receiver
-    // task.
-    let (mut tx, rx): (mpsc::Sender<Option<T>>, mpsc::Receiver<Option<T>>) = mpsc::channel(0);
+    let (tx, rx): (mpsc::Sender<Option<T>>, mpsc::Receiver<Option<T>>) = mpsc::channel(0);
     let rx: Box<Stream<Item=Option<T>, Error=io::Error> + Send> = Box::new(rx.map_err(|_| panic!()));
-
+    *user_tx.write().unwrap() = Some(tx.clone());
     Box::new(
         connect.and_then(move |mut tcp_stream| {
             let mut message_codec: MessageCodec<T> = MessageCodec::new(client_name);
@@ -265,7 +236,6 @@ fn start_client<T, F, U>(connect: U,
                 }
                 Ok(())
             });
-            // tokio::spawn(send_to_server);
 
             // Spawn a receiver task.
             let receive_and_process = stream.for_each(move |(name, msg): (Option<String>, Option<T>)| {
@@ -274,22 +244,20 @@ fn start_client<T, F, U>(connect: U,
                         println!("client received unexpected message");
                     }
                     None => {
-                        let msg = msg.unwrap();
-                        let msgs = process_function(msg);
-                        for msg in msgs {
-                            tx.try_send(Some(msg)).unwrap();
-                        }
+                        client_tx.send(msg).unwrap();
                     }
                 }
                 Ok(())
-            });
-            tokio::spawn(
-                send_to_server.select(receive_and_process)
-                    .and_then(|_| {
-                        println!("server closed");
-                        Ok(())
-                    }).map_err(|_| {})
-            );
+            }).map_err(|e| { println!("faild to connect. err:{:?}", e); });
+            tokio::spawn(send_to_server);
+            tokio::spawn(receive_and_process);
+//            tokio::spawn(
+//                send_to_server.select(receive_and_process)
+//                    .and_then(|_| {
+//                        println!("closed");
+//                        Ok(())
+//                    }).map_err(|_| {})
+//            );
             Ok(())
         }).map_err(|e| { println!("faild to connect. err:{:?}", e); })
     )

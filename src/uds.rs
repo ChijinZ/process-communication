@@ -33,24 +33,20 @@ impl<T> UdsFuzzServer<T>
         }
     }
 
-    /// *first_msg* is the first message that server send to the client which just
-    /// connect to server.
-    ///
-    /// *process_fuction* receive a tuple of <client_name, message>, and return
-    /// a series of tuple of (client_name,message) indicating which message will be
-    /// sent to which client. Note that if you want to send a message to current
-    /// client, you should set client_name as a string with 0 length, i.e. ""
-    pub fn start_server<F>(&self, first_msg: T,
-                           process_function: F)
+    pub fn start_server<F>(&self,
+                           user_tx: Arc<RwLock<Option<mpsc::Sender<Option<T>>>>>,
+                           server_tx: Box<std::sync::mpsc::Sender<Option<T>>>,
+                           register_logic: F)
                            -> Box<Future<Item=(), Error=()> + Send + 'static>
-        where F: FnMut(String, T) -> Vec<T> + Send + Sync + 'static + Clone
+        where F: FnMut(&str, u64) + Send + Sync + 'static + Clone+ std::fmt::Debug
     {
         let path = Path::new(&self.path_name);
         let listener = UnixListener::bind(path)
             .expect("unable to bind Unix listener");
         start_server(listener.incoming(),
-                     first_msg,
-                     process_function,
+                     register_logic,
+                     user_tx,
+                     server_tx,
                      self.name.clone())
     }
 }
@@ -77,13 +73,14 @@ impl<T> UdsFuzzClient<T>
         }
     }
 
-    /// process_function receive a message from server and send a series
-    /// of messages to server
-    pub fn start_client<F>(&self, process_function: F) -> Box<Future<Item=(), Error=()> + Send + 'static>
-        where F: FnMut(T) -> Vec<T> + Send + Sync + 'static
+    pub fn start_client(&self,
+                        user_tx: Arc<RwLock<Option<mpsc::Sender<Option<T>>>>>,
+                        client_tx: Box<std::sync::mpsc::Sender<Option<T>>>)
+                        -> Box<Future<Item=(), Error=()> + Send + 'static>
     {
         start_client(UnixStream::connect(Path::new(&self.path_name)),
                      self.name.clone(),
-                     process_function)
+                     user_tx,
+                     client_tx)
     }
 }
